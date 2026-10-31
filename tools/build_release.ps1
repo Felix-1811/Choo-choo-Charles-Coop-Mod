@@ -13,7 +13,7 @@ $stage = Join-Path $dist "CharlesCoop-$ver"
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory -Force (Join-Path $stage "CharlesCoop\Scripts") | Out-Null
 Copy-Item (Join-Path $root "installer\*") $stage
-foreach ($m in "main", "avatar", "players", "sync", "train", "respawn", "progress") {
+foreach ($m in "main", "avatar", "players", "sync", "train", "respawn", "progress", "enemies") {
   Copy-Item (Join-Path $src "$m.lua") (Join-Path $stage "CharlesCoop\Scripts")
 }
 $zip = Join-Path $dist "CharlesCoop-$ver.zip"

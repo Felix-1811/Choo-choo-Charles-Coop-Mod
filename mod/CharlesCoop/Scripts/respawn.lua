@@ -91,6 +91,13 @@ end
 local function on_death(log)
   local h = M.last_remote_hit
   local false_death = h and os.clock() - h.t < 0.6
+  -- an enemy's kill meant for another player (Charles grabbing a guest kills player 0;
+  -- the death screen shows ~5 s later, run 20261031-151438)
+  if not false_death and os.clock() < (M.false_until or 0) then
+    false_death = true
+    h = { t = os.clock(), bar = M.false_bar or M.bar_last }
+    M.false_until = 0
+  end
   local l = M.my_last_loc
   local spot = false_death and l and { X = l.X, Y = l.Y, Z = l.Z + 20 } or nil
   log("respawn: this player died" .. (false_death and " (from a hit on another player's copy: respawn in place)" or ""))
@@ -206,6 +213,12 @@ function M.install(log, role, send)
   log("respawn: hook Damage -> " .. (ok and "ok" or tostring(err)))
 end
 
+-- Host: the next death of this player within `secs` is not real (see on_death).
+function M.mark_false_death(secs)
+  M.false_until = os.clock() + secs
+  M.false_bar = M.bar_last
+end
+
 -- Guest: damage the host routed to us. Skips a hit the guest's own machine already took
 -- (a fall is computed on both machines).
 function M.hurt(log, amount)
@@ -284,9 +297,20 @@ function M.player_index(pc)
 end
 
 -- Host: give job.pc a new character, at job.spot or on the train.
+M.GAP = 3   -- seconds between two respawns
 function M.respawn(log, job)
   local pc = job.pc
   if not valid(pc) then return end
+  -- two respawns within ~2 s (Charles catching a guest: the host's false death and the
+  -- guest's death) crashed the guest three times out of three (runs 153031, 154123,
+  -- 155123); 2 s apart it did not (152003). Keep them apart.
+  local wait = (M.last_respawn or -99) + M.GAP - os.clock()
+  if wait > 0 then
+    log(string.format("respawn: %s waits %.1f s (another respawn just ran)", pc:GetFName():ToString(), wait))
+    ExecuteWithDelay(math.floor(wait * 1000) + 50, function() ExecuteInGameThread(function() M.respawn(log, job) end) end)
+    return
+  end
+  M.last_respawn = os.clock()
   local is_local = safe(function() return pc:IsLocalController() end, false)
   -- the dying character: the game may already have taken it from the controller, and if it
   -- is left alive its death sequence later takes the NEW character away from the player

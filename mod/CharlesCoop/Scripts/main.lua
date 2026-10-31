@@ -2,7 +2,7 @@
 -- Phase 1 goal: can the engine's own netcode put a second player in the host's world?
 -- Role comes from the environment (COOP_ROLE=host|guest), never from keys: UE4SS key
 -- binds reach every running copy (playbook/lessons.md #55).
-local VERSION = "0.2.0"
+local VERSION = "0.3.0"
 -- Players set role and host address in Mods/CharlesCoop/coop.ini (written by the
 -- launcher scripts); the environment overrides it for the test harness.
 -- This mod's folder: from the script path, so it works whatever the working directory is.
@@ -224,6 +224,7 @@ local function host_services(conns)
   require("players").fix_remote(log)
   require("avatar").apply(log)
   require("progress").install(log, "host", function(m) sync.send(log, m) end)
+  if os.getenv("COOP_RETARGET") ~= "0" then local en = require("enemies"); en.install(log); en.retarget(log) end
   if not M_stream then
     M_stream = true
     LoopAsync(100, function() ExecuteInGameThread(function() sync.host_tick(log) end); return false end)
@@ -320,6 +321,29 @@ LoopAsync(3000, function()
         if (phase_t == 39 or phase_t == 60) and me then log("EXPLORE die"); pcall(function() me:Damage(1000.0, 1.0, nil) end) end
         if phase_t == 81 and me then log("EXPLORE hit 10"); pcall(function() me:Damage(10.0, 1.0, nil) end) end
         if phase_t >= 87 then touch("host_done"); go("done") end
+      elseif phase == "wait_guest" and TEST == "charles_probe" then
+        -- host only: what makes Charles move? (state dump + function trace, train ride, walk off)
+        local en, train = require("enemies"), require("train")
+        if phase_t == 30 then
+          require("trace").class(log, "/Game/_GAME/Blueprints/TrainBlueprints/CharlesCharacter.CharlesCharacter_C", 8)
+          local ac = FindFirstOf("CharlesAIController_C")
+          if valid(ac) then require("trace").class(log, ac:GetClass():GetFullName():match("^%S+%s+(.+)$") or "", 8) end
+        end
+        if phase_t >= 27 and phase_t % 6 == 0 then en.charles_state(log, "t=" .. phase_t) end
+        if phase_t == 45 then log("CPROBE drive"); train.drive_long(log, 60, function() log("CPROBE drive done") end) end
+        if phase_t == 120 then
+          local me = require("explore").own(log)
+          local ch = FindFirstOf("CharlesCharacter_C")
+          if me and valid(ch) then
+            local l, c = me:K2_GetActorLocation(), ch:K2_GetActorLocation()
+            local dx, dy = c.X - l.X, c.Y - l.Y
+            local d = math.sqrt(dx * dx + dy * dy)
+            log(string.format("CPROBE host to 6000 from Charles (was %.0f)", d))
+            pcall(function() ch:K2_SetActorLocation({ X = l.X + dx / d * 6000, Y = l.Y + dy / d * 6000, Z = c.Z }, false, {}, true) end)
+          end
+        end
+        if phase_t == 126 or phase_t == 150 then shot("charles probe") end
+        if phase_t >= 180 then touch("host_done"); go("done") end
       elseif phase == "wait_guest" and TEST == "lever_probe" then
         if phase_t >= 45 and not M_probe_started then   -- after the boat intro hands over the character
           M_probe_started = true
@@ -394,6 +418,123 @@ LoopAsync(3000, function()
           end
           if M_play_t == 117 then touch("host_drive_done") end
         end
+        if TEST == "guns" and M_restart then
+          M_play_t = (M_play_t or 0) + 3
+          local en, sync, train = require("enemies"), require("sync"), require("train")
+          if M_play_t == 6 then
+            local me = require("explore").own(log)
+            if me then
+              local l, f, r = me:K2_GetActorLocation(), me:GetActorForwardVector(), me:K2_GetActorRotation()
+              sync.send(log, string.format("board|%.2f|%.2f|%.2f|%.1f", l.X + f.X * 300, l.Y + f.Y * 300, l.Z + 20, r.Yaw + 180))
+            end
+          end
+          if M_play_t == 12 then log("GUNTEST drive"); train.drive_long(log, 75, function() log("GUNTEST drive done") end) end
+          local ch = FindFirstOf("CharlesCharacter_C")
+          local t = train.find()
+          local d = (valid(ch) and t) and (function() local a, b = ch:K2_GetActorLocation(), t:K2_GetActorLocation(); return math.sqrt((a.X-b.X)^2+(a.Y-b.Y)^2) end)() or -1
+          if M_play_t >= 12 and valid(ch) then
+            log(string.format("GUNTEST t=%d charles-train=%.0f recent=%s hit=%s %s", M_play_t, d, tostring(safe(function() return ch["Recent Damage"] end)),
+              tostring(safe(function() return ch["Was Just Hit"] end)), en.describe(ch)))
+          end
+          if not M_gun_sent and M_play_t >= 24 and d > 0 and d < 7000 then
+            M_gun_sent = true
+            log("GUNTEST guest opens fire"); sync.send(log, "gunfire|30")
+            -- (teleporting Charles next to the train got him stuck against it and stopped
+            -- the train, run 174321: let him come by himself)
+            M_gun_t = M_play_t
+            sync.send(log, "hitcharles|7.5")
+          end
+          if M_play_t == 42 or M_play_t == 54 then shot("guns") end
+          if M_play_t == 96 then touch("host_drive_done") end
+        end
+        if TEST == "deathcall" and M_restart then
+          -- repro for the guest crash after Charles catches it (runs 153031, 154123, 155123)
+          -- COOP_DC: "die" = also kill the guest on its machine (what 0.3 dev did), "none" = only Death call
+          M_play_t = (M_play_t or 0) + 3
+          local rc
+          for _, ch in ipairs(FindAllOf("BP_NMCharacter_Player_C") or {}) do
+            if valid(ch) and not safe(function() return ch:IsLocallyControlled() end, true) then rc = ch end
+          end
+          if M_play_t == 12 or M_play_t == 60 then
+            local v = os.getenv("COOP_DC") or "die"
+            log("DEATHCALL step variant=" .. v .. " on " .. tostring(rc and rc:GetFName():ToString()))
+            if rc then
+              require("respawn").mark_false_death(12)
+              local ok, err = pcall(function() rc["Death call"](rc) end)
+              log("DEATHCALL -> " .. (ok and "ok" or tostring(err)))
+              if v == "die" then require("sync").send(log, "die") end
+            end
+          end
+          if M_play_t % 6 == 0 then log("DEATHCALL t=" .. M_play_t) end
+          if M_play_t == 105 then touch("host_drive_done") end
+        end
+        if TEST == "enemies" and M_restart then
+          M_play_t = (M_play_t or 0) + 3
+          local en, sync, train = require("enemies"), require("sync"), require("train")
+          local function remote_char()
+            for _, ch in ipairs(FindAllOf("BP_NMCharacter_Player_C") or {}) do
+              if valid(ch) and not safe(function() return ch:IsLocallyControlled() end, true) then return ch end
+            end
+          end
+          if M_play_t == 6 then
+            local me = require("explore").own(log)
+            if me then
+              local l, f, r = me:K2_GetActorLocation(), me:GetActorForwardVector(), me:K2_GetActorRotation()
+              sync.send(log, string.format("board|%.2f|%.2f|%.2f|%.1f", l.X + f.X * 300, l.Y + f.Y * 300, l.Z + 20, r.Yaw + 180))
+            end
+          end
+          if M_play_t % 12 == 0 then en.scan(log, "host t=" .. M_play_t) end
+          if M_play_t % 6 == 0 then log("ENEMYTEST train " .. train.state()) end
+          -- 1. Charles sleeps (MovementMode 0) until the train moves: drive
+          if M_play_t == 12 then log("ENEMYTEST drive"); train.drive_long(log, 45, function() log("ENEMYTEST drive done") end) end
+          M_charles = FindFirstOf("CharlesCharacter_C")
+          -- 2. drop the guest between Charles and the train: Charles must switch to it
+          if M_play_t == 57 and os.getenv("COOP_TRACE") == "1" then
+            require("trace").class(log, "/Game/_GAME/Blueprints/TrainBlueprints/CharlesCharacter.CharlesCharacter_C", 6)
+            require("trace").class(log, "/Game/_GAME/Blueprints/DeathScreen.DeathScreen_C", 6)
+            require("trace").class(log, "/Game/NaturalMovementV3/Blueprint/Character/BP_NMCharacter.BP_NMCharacter_C", 4)
+          end
+          if M_play_t == 60 and valid(M_charles) then
+            local t = train.find()
+            local c, tl = M_charles:K2_GetActorLocation(), t and t:K2_GetActorLocation()
+            if tl then
+              local dx, dy = tl.X - c.X, tl.Y - c.Y
+              local d = math.sqrt(dx * dx + dy * dy)
+              local k = math.min(2000, d / 2) / d
+              log(string.format("ENEMYTEST guest off the train near Charles (Charles-train %.0f)", d))
+              sync.send(log, string.format("board|%.2f|%.2f|%.2f|0", c.X + dx * k, c.Y + dy * k, c.Z + 400))
+            end
+          end
+          if valid(M_charles) and M_play_t >= 12 then log("CHARLESTEST " .. en.describe(M_charles)) end
+          if valid(M_charles) and M_play_t % 6 == 0 then log("CHARLESBB " .. en.blackboard(M_charles)) end
+          if valid(M_charles) and M_play_t % 3 == 0 then log("CHARLESNET " .. en.net_state(M_charles)) end
+          if M_play_t % 15 == 0 then
+            for _, pc in ipairs(FindAllOf("PlayerController") or {}) do
+              if valid(pc) and not safe(function() return pc:IsLocalController() end, true) then
+                local vt = safe(function() return pc:GetViewTarget() end)
+                local cam = safe(function() return pc.PlayerCameraManager end)
+                local camloc = valid(cam) and safe(function() return cam:GetCameraLocation() end)
+                local vl = valid(vt) and safe(function() return vt:K2_GetActorLocation() end)
+                log(string.format("VIEW guest pc=%s viewtarget=%s at %s camera=%s pcloc=%s", pc:GetFName():ToString(),
+                  valid(vt) and vt:GetFName():ToString() or "none", vl and string.format("(%.0f %.0f %.0f)", vl.X, vl.Y, vl.Z) or "?",
+                  camloc and string.format("(%.0f %.0f %.0f)", camloc.X, camloc.Y, camloc.Z) or "?",
+                  (function() local l = safe(function() return pc:K2_GetActorLocation() end); return l and string.format("(%.0f %.0f %.0f)", l.X, l.Y, l.Z) or "?" end)()))
+              end
+            end
+          end
+          -- 3. a cultist next to the (now distant) guest, aimed at the host: must switch
+          if M_play_t == 105 then
+            local rc = remote_char()
+            local pick
+            for _, e in ipairs(en.list()) do if e:GetClass():GetFName():ToString() == "Cultist_C" and not safe(function() return e.Dead end, false) then pick = e; break end end
+            if rc and pick then M_enemy = pick; en.bring(log, pick, rc, 1500, require("explore").own(log)) else log("ENEMYTEST no cultist to bring") end
+          end
+          if M_enemy and valid(M_enemy) then log("ENEMYTEST " .. en.describe(M_enemy)) end
+          if M_play_t == 12 then local c1 = FindFirstOf("Cultist_C"); if valid(c1) then log("CULTISTBB " .. en.blackboard(c1)) end end
+          if M_enemy and valid(M_enemy) and M_play_t % 6 == 0 then log("CULTISTBB " .. en.blackboard(M_enemy)) end
+          if M_play_t == 24 or M_play_t == 45 or M_play_t == 66 or M_play_t == 75 or M_play_t == 111 or M_play_t == 126 then shot("enemies") end
+          if M_play_t == 153 then touch("host_drive_done") end
+        end
         if TEST == "play" and M_restart then
           M_play_t = (M_play_t or 0) + 3
           local sync, train = require("sync"), require("train")
@@ -451,10 +592,15 @@ LoopAsync(3000, function()
       elseif phase == "joining" then
         if net:find("^client") and not in_menu(wp) then log("JOINED host world " .. wp); go("joined") end
         if phase_t >= 120 then log("FAIL: guest did not join within 120 s"); shot("guest join failed"); touch("guest_done"); go("done") end
-      elseif phase == "joined" and ((TEST == "train_sync" or TEST == "train_long" or TEST == "train_ride") or TEST == "play" or TEST == "coop") then
+      elseif phase == "joined" and ((TEST == "train_sync" or TEST == "train_long" or TEST == "train_ride") or TEST == "play" or TEST == "coop" or TEST == "enemies" or TEST == "deathcall" or TEST == "guns") then
         if phase_t >= 3 then guest_services() end
         if phase_t >= 51 then require("avatar").apply(log) end
-        if (TEST == "play" or TEST == "coop") and phase_t >= 51 and phase_t % 6 == 0 then shot("guest play") end
+        if (TEST == "play" or TEST == "coop" or TEST == "guns") and phase_t >= 51 and phase_t % 6 == 0 then shot("guest play") end
+        if TEST == "enemies" and phase_t >= 51 and phase_t % 6 == 0 then require("enemies").scan(log, "guest t=" .. phase_t); shot("guest enemies") end
+        if TEST == "enemies" and phase_t >= 51 and phase_t % 3 == 0 then
+          local c = FindFirstOf("CharlesCharacter_C")
+          if c then log("CHARLESNET guest " .. require("enemies").describe(c) .. " " .. require("enemies").net_state(c)) end
+        end
         if TEST == "coop" and phase_t % 3 == 0 then
           require("sync").guest_send(log, "ping|" .. phase_t .. "|" .. os.date("%H:%M:%S"))
           local pr = require("progress")
@@ -470,7 +616,7 @@ LoopAsync(3000, function()
         if TEST == "train_ride" and phase_t >= 51 then log("RIDE guest " .. require("train").ride_report()) end
         if phase_t % 30 == 0 or (TEST == "train_ride" and phase_t % 9 == 0) then shot("guest train sync") end
         if exists("host_drive_done") and not M_gdone then M_gdone = phase_t end
-        if (M_gdone and phase_t >= M_gdone + 6) or phase_t >= 240 then log("guest observation finished"); touch("guest_done"); go("done") end
+        if (M_gdone and phase_t >= M_gdone + 6) or phase_t >= 300 then log("guest observation finished"); touch("guest_done"); go("done") end
       elseif phase == "joined" then
         if phase_t >= 3 then guest_services() end
         if phase_t >= 51 then require("avatar").apply(log) end

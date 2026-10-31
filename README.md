@@ -44,14 +44,24 @@ Tested with two copies of the game on one PC (`test/run_pair.ps1`, scenario `coo
 | Shared pickups: anyone picks up -> everyone gets it, gone for everyone | works (scraps and quest items, both directions) |
 | Respawn on the train without reloading, death screen closes by itself | works (host and guest, repeated deaths) |
 | Damage goes to the player who was hit | works; see the known issues |
-| Charles / cultists chasing guests | untested |
-| Guns, upgrades, story events (quests, cutscenes) shared | not done |
+| Cultists hunt and shoot whichever player is nearest | works (hits reach the guest, who can die and respawn) |
+| Charles hunts a guest who is off the train | works; the mod does the catch itself (see known issues) |
+| Charles seen by guests | works (streamed from the host at 10 Hz) |
+| Guest uses a train gun, hits damage the real Charles / cultists | works in a bot test (machine gun) |
+| Host sees the guest's gun turn and fire | not done |
+| Upgrades, story events (quests, cutscenes) shared | not done |
 | Two different PCs over the internet | untested |
 
 Latest `coop` run (2026-10-31): host and guest each pick up an item and the other side
 gets it too. The guest dies on its own machine twice and once from damage on the host.
 The host dies twice. Every death gave exactly one respawn on the train, and both players
 were alive and in sight of each other at the end.
+
+Latest `enemies` run (2026-10-31): the train wakes Charles, the guest is dropped next
+to him, and he switches to the guest and goes for them. The mod catches the guest at 781
+units: the guest dies and respawns on the train, while the host stays alive. A cultist
+aimed at the host switches to the nearer guest by itself. `guns` run: a machine-gun hit
+from the guest's copy of the gun (2.07 on Charles's legs) was applied to the host's Charles.
 
 ### Known issues
 
@@ -61,8 +71,16 @@ were alive and in sight of each other at the end.
   restored, after about 1.5 s.
 - The train can flicker for a moment where one track joins the next.
 - What the first train lever does in co-op is unknown.
-- One test run had a guest crash about 25 s after joining (access violation, not
-  reproduced in the 8 runs after it).
+- Charles's own catch always takes the host (player 0), and the guest's game crashed
+  every time the game did it in testing. So when Charles hunts a guest on foot, the mod
+  catches the guest itself when he gets within 1000 units: the guest dies and respawns
+  on the train, and he leaves that guest alone for 20 s.
+- Charles stays asleep until the train moves (as in single player).
+- Guests crashed now and then in testing (access violation): once ~25 s after joining,
+  once on a character the engine had dropped and re-created when players were far apart
+  (fixed: player characters now stay relevant at any distance), and once on startup
+  before the mod did anything. The host crashed once during a Charles chase (cause
+  unknown).
 
 ## How it works
 
@@ -83,6 +101,17 @@ were alive and in sight of each other at the end.
   for the first character of a session). The host destroys the dying character, then
   runs `GameMode:RestartPlayer` and puts the new character on the train's respawn point.
   If a controller loses its character without a death, the mod re-possesses it.
+- **Enemies** (`enemies.lua`): the AI only runs on the host and reads blackboard keys.
+  Every 3 s each enemy's `Player Ref` goes to the nearest living player; hunting cultists
+  and Charles (10 Hz) also get the blackboard key `Actor Ref`, and Charles gets
+  `Is Player In Train?` and `Sensed Actor Location` too. The engine sent Charles's
+  movement to guests only while he stood still, so the host streams him and the guest's
+  copy is a puppet with its own tick, movement and damage boxes off.
+- **Guns** (`enemies.lua`, `sync.lua`): a guest's gun works on its own copy of the train.
+  Every `Damage` on a guest's copy of Charles or a cultist is sent to the host, which
+  applies it to the real one with the same hit component. Guest clicks on gun mounts are
+  not replayed on the host (it would put the host in the gun seat); levers and gun
+  equippers are.
 - **Damage** (`respawn.lua`): characters you don't control get the game's own "Cancel
   Fall Damage on Reset" flag every 100 ms, so their falls don't hurt you. For other hits
   on them, your health bar is put back and the host sends the hit to its owner.

@@ -62,7 +62,11 @@ function M.apply(log)
     end
     if valid(ch) and not ch:GetFullName():find("Default__") and not mine(ch) then
       n = n + 1
-      if not M.done[name] then
+      -- a character the engine has just (re)created crashed the guest when it got a body
+      -- within a second (run 20261031-165751): wait until a second check still sees it
+      M.seen = M.seen or {}
+      M.seen[name] = (M.seen[name] or 0) + 1
+      if not M.done[name] and M.seen[name] >= 2 then
         M.done[name] = true
         local mname = M.MESHES[((n - 1) % #M.MESHES) + 1]
         local skm = load(DIR .. mname .. "." .. mname)

@@ -28,6 +28,15 @@ end
 -- Call from the game thread.
 M.done = {}
 function M.fix_remote(log)
+  -- every player character stays relevant to every connection: past the 15000-unit cull
+  -- distance the engine dropped the host's character on the guest and re-created it when
+  -- they met again, and the guest crashed on the new one (run 20261031-165751)
+  for _, ch in ipairs(FindAllOf("BP_NMCharacter_Player_C") or {}) do
+    if valid(ch) and not ch:GetFullName():find("Default__") and safe(function() return ch.bAlwaysRelevant end) == false then
+      safe(function() ch.bAlwaysRelevant = true end)
+      log("players: " .. ch:GetFName():ToString() .. " bAlwaysRelevant = true")
+    end
+  end
   local me = own_character(); if not me then return end
   local ref = safe(function() return me.CharacterMovement end)
   if not valid(ref) then return end

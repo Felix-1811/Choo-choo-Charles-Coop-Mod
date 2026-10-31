@@ -33,6 +33,10 @@ function M.send(log, msg)
 end
 
 function M.host_tick(log)
+  local cmsg = safe(function() return require("enemies").host_msg() end)
+  if cmsg then
+    for _, pc in ipairs(remote_pcs()) do pcall(function() pc:ClientMessage("COOP|" .. cmsg, FName("None"), 0.0) end) end
+  end
   local msg = safe(M.train_msg); if not msg then return end
   for _, pc in ipairs(remote_pcs()) do
     local ok, err = pcall(function() pc:ClientMessage("COOP|" .. msg, FName("None"), 0.0) end)
@@ -153,6 +157,7 @@ function M.host_handle(log, body, pc)
         pcall(function() other:ClientMessage("COOP|pickup|" .. f[2] .. "|" .. (f[3] or "None"), FName("None"), 0.0) end)
       end
     end
+  elseif f[1] == "hit" then require("enemies").host_hit(log, f[2], tonumber(f[3]), tonumber(f[4]), f[5], pc)
   elseif f[1] == "ping" then log("sync: ping t=" .. tostring(f[2]) .. " sent " .. tostring(f[3]))
   elseif f[1] == "interact" then train.remote_interact(log, f[2], f[3] == "1")
   elseif f[1] == "release" then train.remote_release(log)
@@ -168,12 +173,22 @@ function M.forward_train_input(log)
       local c = safe(function() return comp:get() end)
       local name = (c and safe(function() return c:IsValid() end, false)) and c:GetFName():ToString() or "none"
       local gp = safe(function() return gamepad:get() end, false) and "1" or "0"
+      -- levers drive the shared train and the equippers pick its gun: the host's train
+      -- does those. Mounting a gun ("... Collision") stays on the guest's own copy: replayed
+      -- on the host it would put the HOST into the gun seat (player 0).
+      if not (name:find("^Lever") or name:find("Equipper")) then
+        log("sync: guest clicked train part " .. name .. " (local only)")
+        return
+      end
       log("sync: guest clicked train part " .. name .. " -> host")
       M.guest_send(log, "interact|" .. name .. "|" .. gp)
     end)
   end)
   local ok2, e2 = pcall(function()
     RegisterHook(TRAIN_FN .. "Interact Released", function() M.guest_send(log, "release") end)
+  end)
+  pcall(function()
+    require("enemies").guest_install_hits(log, function(m) M.guest_send(log, m) end)
   end)
   log("sync: guest train input hooks -> " .. (ok1 and "ok" or tostring(e1)) .. ", " .. (ok2 and "ok" or tostring(e2)))
 end
@@ -186,6 +201,7 @@ function M.install_guest(log)
       M.rx = M.rx + 1
       local body = msg:sub(6)
       if body:sub(1, 6) == "train|" then ExecuteInGameThread(function() M.apply_train(log, body) end) end
+      if body:sub(1, 8) == "charles|" then ExecuteInGameThread(function() require("enemies").guest_apply(log, body) end) end
       if body:sub(1, 6) == "board|" then
         local x, y, z, yaw = body:match("^board|([^|]+)|([^|]+)|([^|]+)|?([^|]*)")
         ExecuteInGameThread(function() train.board_self(log, tonumber(x), tonumber(y), tonumber(z), tonumber(yaw)) end)
@@ -202,11 +218,23 @@ function M.install_guest(log)
       if body:sub(1, 7) == "pickup|" then ExecuteInGameThread(function() local n, id = body:match("^pickup|([^|]+)|?([^|]*)"); require("progress").apply_pickup(log, n, id) end) end
       if body:sub(1, 9) == "gathered|" then ExecuteInGameThread(function() require("progress").guest_apply(log, body:sub(10)) end) end
       if body:sub(1, 5) == "hurt|" then ExecuteInGameThread(function() require("respawn").hurt(log, tonumber(body:sub(6)) or 0) end) end
+      if body:sub(1, 11) == "hitcharles|" then ExecuteInGameThread(function()
+        local c = FindFirstOf("CharlesCharacter_C")
+        local a = tonumber(body:sub(12)) or 1
+        log("sync: test hit on our Charles copy " .. a)
+        if c then pcall(function() c:Damage(a, 1.0, c["Body Hitbox"]) end) end
+      end) end
+      if body:sub(1, 8) == "gunfire|" then ExecuteInGameThread(function() require("guns").guest_fire(log, tonumber(body:sub(9)) or 10) end) end
       if body == "fetch" then ExecuteInGameThread(function() require("progress").fetch_test(log) end) end
       if body == "levers" then ExecuteInGameThread(function() train.guest_lever_test(log) end) end
     end)
   end)
   log("sync: guest hook ClientMessage -> " .. (ok and "ok" or tostring(err)))
+  if os.getenv("COOP_TEST") == "enemies" then
+    for _, fn in ipairs({ "ClientSetViewTarget", "ClientRestart", "ClientSetCameraFade", "ClientPlayCameraShake", "ClientIgnoreMoveInput", "ClientGameEnded", "ClientSetHUD" }) do
+      pcall(function() RegisterHook("/Script/Engine.PlayerController:" .. fn, function(self, a) log("sync: guest got " .. fn) end) end)
+    end
+  end
   train.make_addressable(nil, log)
 end
 return M

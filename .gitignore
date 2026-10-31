@@ -1,0 +1,8 @@
+runs/
+dist/
+gamedir.txt
+coop.ini
+*.sav
+*.log
+*.png
+*.dmp

@@ -17,6 +17,10 @@ M.DELAY = 5          -- seconds on the death screen before the respawn
 
 local CHAR = "/Game/NaturalMovementV3/Blueprint/Character/BP_NMCharacter.BP_NMCharacter_C:"
 
+pcall(function() require("sched").on_reset(function()
+  M.my_char, M.pb, M.screen_widget, M.had_char, M.gone_ticks, M.dead = nil, nil, nil, false, 0, false
+end) end)
+
 local function local_pc()
   for _, pc in ipairs(FindAllOf("PlayerController") or {}) do
     if valid(pc) and safe(function() return pc:IsLocalController() end, false) then return pc end
@@ -122,6 +126,15 @@ end
 
 function M.guard_tick(log)
   M.ticks = (M.ticks or 0) + 1
+  -- a guest that lost its connection is leaving the level: touching characters then
+  -- crashed it (run 20261031-193048, "taking it back" mid-disconnect)
+  if M.role == "guest" then
+    local pc = local_pc()
+    if not (pc and valid(safe(function() return pc.NetConnection end))) then
+      M.had_char, M.gone_ticks, M.my_char = false, 0, nil
+      return
+    end
+  end
   if not M.screen_hooked and M.ticks % 50 == 1 then hook_screen(log) end
   local me
   for _, ch in ipairs(FindAllOf("BP_NMCharacter_Player_C") or {}) do
@@ -186,7 +199,8 @@ function M.install(log, role, send)
   if M.installed then return end
   M.installed = true
   M.role, M.send = role, send
-  LoopAsync(100, function() ExecuteInGameThread(function() M.guard_tick(log) end); return false end)
+  local sched = require("sched"); sched.install(log)
+  sched.every("respawn", 0.1, function() M.guard_tick(log) end)
   local ok, err = pcall(function()
     RegisterHook(CHAR .. "Damage", function(self, amount)
       if M.applying_hurt then return end

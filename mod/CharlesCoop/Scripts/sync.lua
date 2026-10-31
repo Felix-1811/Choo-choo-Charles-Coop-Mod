@@ -5,6 +5,7 @@ local M = { rx = 0, applied = 0, last_err = nil }
 local function safe(f, d) local ok, v = pcall(f); if ok then return v end; return d end
 local function valid(o) return o ~= nil and safe(function() return o:IsValid() end, false) end
 local train = require("train")
+pcall(function() require("sched").on_reset(function() M.my_pc = nil end) end)
 local fmt = string.format
 
 local function remote_pcs()
@@ -86,14 +87,19 @@ end
 -- shipping builds keep but ignore (the console command only runs in development builds),
 -- so the string reaches the host's hook and nothing else happens.
 function M.guest_send(log, msg)
-  for _, pc in ipairs(FindAllOf("PlayerController") or {}) do
-    if valid(pc) and safe(function() return pc:IsLocalController() end, false) then
-      local ok, err = pcall(function() pc:ServerExecRPC("COOP|" .. msg) end)
-      M.tx = (M.tx or 0) + 1
-      if not ok then log("sync: ServerExecRPC failed: " .. tostring(err)) end
-      return
+  -- cached: FindAllOf walks every object, and gun aim can send at 10 Hz
+  local pc = M.my_pc
+  if not (valid(pc) and safe(function() return pc:IsLocalController() end, false)) then
+    pc = nil
+    for _, p in ipairs(FindAllOf("PlayerController") or {}) do
+      if valid(p) and safe(function() return p:IsLocalController() end, false) then pc = p; break end
     end
+    M.my_pc = pc
   end
+  if not pc then return end
+  local ok, err = pcall(function() pc:ServerExecRPC("COOP|" .. msg) end)
+  M.tx = (M.tx or 0) + 1
+  if not ok then log("sync: ServerExecRPC failed: " .. tostring(err)) end
 end
 
 local TRAIN_FN = "/Game/_GAME/Blueprints/TrainBlueprints/PlayerTrain.PlayerTrain_C:"
@@ -113,6 +119,8 @@ function M.install_host(log)
       if msg:sub(1, 5) ~= "COOP|" then return end
       M.hrx = (M.hrx or 0) + 1
       local body = msg:sub(6)
+      -- frequent messages are stored, not queued (see turret.lua)
+      if body:sub(1, 7) == "gunaim|" then require("turret").receive(body); return end
       ExecuteInGameThread(function() M.host_handle(log, body, pc) end)
     end)
   end)
@@ -157,6 +165,7 @@ function M.host_handle(log, body, pc)
         pcall(function() other:ClientMessage("COOP|pickup|" .. f[2] .. "|" .. (f[3] or "None"), FName("None"), 0.0) end)
       end
     end
+  elseif f[1] == "gunaim" then require("turret").apply(log, body)
   elseif f[1] == "hit" then require("enemies").host_hit(log, f[2], tonumber(f[3]), tonumber(f[4]), f[5], pc)
   elseif f[1] == "ping" then log("sync: ping t=" .. tostring(f[2]) .. " sent " .. tostring(f[3]))
   elseif f[1] == "interact" then train.remote_interact(log, f[2], f[3] == "1")
@@ -218,6 +227,14 @@ function M.install_guest(log)
       if body:sub(1, 7) == "pickup|" then ExecuteInGameThread(function() local n, id = body:match("^pickup|([^|]+)|?([^|]*)"); require("progress").apply_pickup(log, n, id) end) end
       if body:sub(1, 9) == "gathered|" then ExecuteInGameThread(function() require("progress").guest_apply(log, body:sub(10)) end) end
       if body:sub(1, 5) == "hurt|" then ExecuteInGameThread(function() require("respawn").hurt(log, tonumber(body:sub(6)) or 0) end) end
+      if body:sub(1, 7) == "gunaim|" then require("turret").receive(body) end
+      if body:sub(1, 9) == "cultdead|" then ExecuteInGameThread(function() require("enemies").guest_dead(log, body:sub(10)) end) end
+      if body:sub(1, 12) == "killcultist|" then ExecuteInGameThread(function()
+        local want = body:sub(13)
+        for _, e in ipairs(FindAllOf("Cultist_C") or {}) do
+          if e:GetFName():ToString() == want then log("sync: test kill on our copy of " .. want); pcall(function() e:Damage(100.0, 1.0, nil) end) end
+        end
+      end) end
       if body:sub(1, 11) == "hitcharles|" then ExecuteInGameThread(function()
         local c = FindFirstOf("CharlesCharacter_C")
         local a = tonumber(body:sub(12)) or 1

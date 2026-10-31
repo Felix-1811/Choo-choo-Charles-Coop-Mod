@@ -19,7 +19,7 @@ Everyone needs their own copy of the game.
    opens the host's save for friends. Pick up the train key in single player first:
    before that, the train levers don't work for anyone.
 4. Friends double-click **Join.bat** and enter the host's address. The game connects by
-   itself. About a minute after loading in they get their character, standing on the
+   itself. About 15 seconds after loading in they get their character, standing on the
    host's train. Their own save is backed up first, because the game autosaves the
    host's world into the joining player's save slot.
 5. **Solo.bat** switches back to normal single player and offers to restore your own save.
@@ -48,7 +48,10 @@ Tested with two copies of the game on one PC (`test/run_pair.ps1`, scenario `coo
 | Charles hunts a guest who is off the train | works; the mod does the catch itself (see known issues) |
 | Charles seen by guests | works (streamed from the host at 10 Hz) |
 | Guest uses a train gun, hits damage the real Charles / cultists | works in a bot test (machine gun) |
-| Host sees the guest's gun turn and fire | not done |
+| Everyone sees where the train gun points | works (sent at 2 Hz, smoothed) |
+| Cultists killed by anyone are dead for everyone (also for late joiners) | works |
+| Guest gets their character ~15 s after loading in; rejoins after a dropped connection | works (rejoin: code path only, not forced in a test) |
+| Host sees the guest's gun fire (muzzle flash, sound) | not done |
 | Upgrades, story events (quests, cutscenes) shared | not done |
 | Two different PCs over the internet | untested |
 
@@ -82,6 +85,10 @@ from the guest's copy of the gun (2.07 on Charles's legs) was applied to the hos
   before the mod did anything. The host crashed once during a Charles chase (cause
   unknown).
 
+Latest batch (2026-10-31, 0.3.1): `coop`, `enemies`, `guns` and a normal-mode join, each
+with a host and a guest: no crash on either side. Every death gave exactly one respawn.
+Charles caught the guest twice, and the guest was on the train 12 s after loading in.
+
 ## How it works
 
 - **Networking:** the game's own Unreal networking. The host runs `open <map>?listen`, the
@@ -112,6 +119,12 @@ from the guest's copy of the gun (2.07 on Charles's legs) was applied to the hos
   applies it to the real one with the same hit component. Guest clicks on gun mounts are
   not replayed on the host (it would put the host in the gun seat); levers and gun
   equippers are.
+- **Scheduler** (`sched.lua`): every periodic job runs from a hook on the train's
+  `ReceiveTick`, on the game thread, instead of separate `LoopAsync` -> `ExecuteInGameThread`
+  loops. Crashes inside UE4SS grew with each such loop. When the world changes, every module
+  drops its cached game objects.
+- **Gun aim** (`turret.lua`): whoever sits at the gun sends its rotation at 2 Hz; the
+  other machines ease their copy of the gun toward it.
 - **Damage** (`respawn.lua`): characters you don't control get the game's own "Cancel
   Fall Damage on Reset" flag every 100 ms, so their falls don't hurt you. For other hits
   on them, your health bar is put back and the host sends the hit to its owner.
@@ -122,6 +135,10 @@ Things learned the hard way:
   can't be changed before the call.
 - `FindAllOf` walks every object in the game. Three of them every 100 ms starved the
   host's game thread until guest messages arrived 22 s late.
+- Many `ExecuteInGameThread` calls per second (and up to 10 `ServerExecRPC` per second)
+  went with more crashes. Run periodic work from a game-thread hook instead.
+- Game objects cached in Lua become dangling after a level change; even `IsValid()` on
+  them can crash.
 
 ## Develop and test
 

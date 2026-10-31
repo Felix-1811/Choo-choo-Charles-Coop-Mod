@@ -10,10 +10,23 @@ local fmt = string.format
 
 M.CLASSES = { "CharlesCharacter_C", "Cultist_C" }
 
+-- cooldowns follow the player (its controller), not the character: a respawned guest
+-- is a new character, and was caught again 17 s after the first catch (run 195524)
+local function player_key(ch)
+  local c = safe(function() return ch.Controller end)
+  return valid(c) and c:GetFullName() or ch:GetFullName()
+end
+
+
 local function name(o) return valid(o) and safe(function() return o:GetFName():ToString() end, "?") or "none" end
 local function loc(a) return safe(function() return a:K2_GetActorLocation() end) end
 local function v3(v) return v and fmt("(%.0f %.0f %.0f)", v.X, v.Y, v.Z) or "?" end
 local function dist(a, b) return math.sqrt((a.X - b.X) ^ 2 + (a.Y - b.Y) ^ 2 + (a.Z - b.Z) ^ 2) end
+
+local function reset()
+  M.charles, M.cultists, M.gch, M.target, M.puppet_done, M.boxes_off = nil, {}, nil, nil, nil, nil
+end
+pcall(function() require("sched").on_reset(reset) end)
 
 function M.list()
   local out = {}
@@ -79,6 +92,7 @@ function M.retarget(log)
   for _, e in ipairs(FindAllOf("Cultist_C") or {}) do
     if valid(e) and not e:GetFullName():find("Default__") then table.insert(M.cultists, e) end
   end
+  pcall(M.host_sync_dead, log)
   local ps = M.players()
   if #ps < 2 then return 0 end
   local changed = 0
@@ -89,7 +103,7 @@ function M.retarget(log)
     if el then
       local best, bd
       for _, p in ipairs(ps) do
-        local cool = e == M.charles and M.cooldown and (M.cooldown[p:GetFullName()] or 0) > os.clock()
+        local cool = e == M.charles and M.cooldown and (M.cooldown[player_key(p)] or 0) > os.clock()
         local pl = not cool and loc(p) or nil
         if pl then local d = dist(el, pl); if not bd or d < bd then best, bd = p, d end end
       end
@@ -230,7 +244,7 @@ function M.focus_charles(log)
       log(fmt("enemies: Charles caught %s (%.0f away): guest dies, Charles back to the host", name(tgt), dist(cl, tl)))
       if valid(pc) then pcall(function() pc:ClientMessage("COOP|die", FName("None"), 0.0) end) end
       M.cooldown = M.cooldown or {}
-      M.cooldown[tgt:GetFullName()] = os.clock() + M.COOLDOWN
+      M.cooldown[player_key(tgt)] = os.clock() + M.COOLDOWN
       local h = host_char()
       if h then safe(function() ch["Player Ref"] = h end); tgt = h; remote = false end
     end
@@ -277,7 +291,8 @@ end
 function M.install(log)
   if M.installed then return end
   M.installed = true
-  LoopAsync(100, function() ExecuteInGameThread(function() pcall(M.focus_charles, log) end); return false end)
+  local sched = require("sched"); sched.install(log)
+  sched.every("charles_focus", 0.1, function() M.focus_charles(log) end)
   log("enemies: Charles focus loop on (10 Hz)")
   -- Charles's grab ("Jumpscare", and "Death call" on a character) always kills player 0,
   -- the host, even when he caught a guest (run 20261031-151438). Hooks run after the
@@ -367,7 +382,8 @@ function M.guest_apply(log, body)
   M.rx = (M.rx or 0) + 1
   if not M.guest_loop then
     M.guest_loop = true
-    LoopAsync(33, function() ExecuteInGameThread(function() pcall(M.guest_step, log) end); return false end)
+    local sched = require("sched"); sched.install(log)
+    sched.every("charles_puppet", 0.033, function() M.guest_step(log) end)
     log("enemies: guest Charles stream on")
   end
 end
@@ -391,9 +407,8 @@ function M.guest_step(log)
   local nl = { X = l.X + (tg.X - l.X) * k, Y = l.Y + (tg.Y - l.Y) * k, Z = l.Z + (tg.Z - l.Z) * k }
   local ny = r.Yaw + wrap(tg.Yaw - r.Yaw) * k
   pcall(function() ch:K2_SetActorLocationAndRotation(nl, { Pitch = 0, Yaw = ny, Roll = 0 }, false, {}, true) end)
-  -- the animation reads the movement component's velocity
-  local cm = safe(function() return ch.CharacterMovement end)
-  if valid(cm) then safe(function() cm.Velocity = { X = (nl.X - l.X) * 30, Y = (nl.Y - l.Y) * 30, Z = 0 } end) end
+  -- (no Velocity write for the animation: one struct write per frame for an unchecked
+  -- benefit, while guests crashed with signs of memory corruption, run 193048)
 end
 -- Guns. A guest fires its own copy of the train's guns; the hits land on its copies of
 -- Charles and the cultists, which the host's AI never sees. Every Damage on a guest's
@@ -445,5 +460,49 @@ function M.host_hit(log, who, amount, slow, comp, pc)
   if M.hits_rx <= 30 or M.hits_rx % 50 == 0 then
     log(fmt("enemies: host applied guest hit on %s %.2f %s -> %s [%d]", who, amount, tostring(comp), ok and "ok" or tostring(err), M.hits_rx))
   end
+end
+-- Dead cultists. A cultist the host killed stayed alive on the guest (hp 6, run
+-- 20261031-180500; death is not replicated). The guest's own kills already show on both
+-- sides through the hit forwarding. Every 3 s the host tells each guest which cultists are
+-- dead (once per guest and cultist, so late joiners and save-dead cultists are covered).
+M.dead_sent = {}
+function M.host_sync_dead(log)
+  local dead = {}
+  for _, e in ipairs(M.cultists or {}) do
+    if valid(e) and (safe(function() return e.Dead end, false) or (safe(function() return e.Health end, 1) or 1) <= 0) then
+      table.insert(dead, name(e))
+    end
+  end
+  if #dead == 0 then return end
+  for _, pc in ipairs(FindAllOf("PlayerController") or {}) do
+    if valid(pc) and not safe(function() return pc:IsLocalController() end, true) then
+      local key = pc:GetFullName()
+      M.dead_sent[key] = M.dead_sent[key] or {}
+      local new = {}
+      for _, n in ipairs(dead) do if not M.dead_sent[key][n] then M.dead_sent[key][n] = true; table.insert(new, n) end end
+      -- several names per message keeps it to one RPC
+      for i = 1, #new, 8 do
+        local chunk = table.concat(new, ",", i, math.min(i + 7, #new))
+        pcall(function() pc:ClientMessage("COOP|cultdead|" .. chunk, FName("None"), 0.0) end)
+      end
+      if #new > 0 then log("enemies: told " .. pc:GetFName():ToString() .. " about " .. #new .. " dead cultist(s)") end
+    end
+  end
+end
+
+-- Guest: kill our copies of the cultists the host says are dead.
+function M.guest_dead(log, list)
+  local want = {}
+  for n in list:gmatch("[^,]+") do want[n] = true end
+  local n = 0
+  for _, e in ipairs(FindAllOf("Cultist_C") or {}) do
+    if valid(e) and want[name(e)] and not safe(function() return e.Dead end, false) then
+      M.applying = true
+      pcall(function() e:Damage(1000.0, 1.0, nil) end)
+      M.applying = false
+      n = n + 1
+    end
+  end
+  log("enemies: " .. n .. " cultist(s) killed on the host's word")
 end
 return M

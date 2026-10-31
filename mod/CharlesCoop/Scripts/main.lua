@@ -2,7 +2,7 @@
 -- Phase 1 goal: can the engine's own netcode put a second player in the host's world?
 -- Role comes from the environment (COOP_ROLE=host|guest), never from keys: UE4SS key
 -- binds reach every running copy (playbook/lessons.md #55).
-local VERSION = "0.3.0"
+local VERSION = "0.3.1"
 -- Players set role and host address in Mods/CharlesCoop/coop.ini (written by the
 -- launcher scripts); the environment overrides it for the test harness.
 -- This mod's folder: from the script path, so it works whatever the working directory is.
@@ -224,10 +224,12 @@ local function host_services(conns)
   require("players").fix_remote(log)
   require("avatar").apply(log)
   require("progress").install(log, "host", function(m) sync.send(log, m) end)
+  require("turret").install(log, function(m) sync.send(log, m) end)
   if os.getenv("COOP_RETARGET") ~= "0" then local en = require("enemies"); en.install(log); en.retarget(log) end
   if not M_stream then
     M_stream = true
-    LoopAsync(100, function() ExecuteInGameThread(function() sync.host_tick(log) end); return false end)
+    local sched = require("sched"); sched.install(log)
+    sched.every("train_stream", 0.1, function() sync.host_tick(log) end)
     log("host: train stream on")
   end
 end
@@ -238,6 +240,7 @@ local function guest_services()
     sy.install_guest(log); sy.forward_train_input(log)
     require("respawn").install(log, "guest", function(m) sy.guest_send(log, m) end)
     require("progress").install(log, "guest", function(m) sy.guest_send(log, m) end)
+    require("turret").install(log, function(m) sy.guest_send(log, m) end)
   end
   require("respawn").watch_screens(log)
 end
@@ -268,12 +271,27 @@ if not SYNC then
           if net:find("^client") and not in_menu(wp) then log("joined " .. HOST_ADDR .. " " .. wp); go("joined")
           elseif phase_t >= 90 then log("could not reach the host at " .. HOST_ADDR .. ", retrying"); go("boot") end
         elseif phase == "joined" then
-          if in_menu(wp) then log("disconnected"); go("boot"); return end
+          if in_menu(wp) then log("disconnected: back to the menu, joining again"); M_early_ready, M_vt_ok = nil, 0; go("boot"); return end
           local sy = require("sync")
           guest_services()
-          -- the host hands over the character once the guest's own intro has run
-          if phase_t == 45 or phase_t == 60 then sy.guest_send(log, "ready") end
-          if phase_t >= 45 then require("avatar").apply(log) end
+          -- the host hands over the character once the guest's own intro has run. The intro
+          -- is over when our camera rests on a player character (the boat intro uses its own
+          -- camera); 6 s of that -> ready. 45 s / 60 s stay as the fallback.
+          local pc = local_pc()
+          local vt = pc and safe(function() return pc:GetViewTarget() end)
+          local pawn = pc and safe(function() return pc.Pawn end)
+          -- the guest has a pawn right after joining (run 194350), so look at the camera:
+          -- on our own pawn = the boat intro's camera is gone
+          local on_char = valid(vt) and valid(pawn) and vt:GetFullName() == pawn:GetFullName()
+          M_vt_ok = on_char and (M_vt_ok or 0) + 3 or 0
+          if phase_t >= 12 and M_vt_ok >= 6 and not M_early_ready then
+            M_early_ready = true
+            log("intro over at " .. phase_t .. " s (camera on our character) -> ready")
+            sy.guest_send(log, "ready")
+          end
+          if (phase_t == 45 or phase_t == 60) and not M_early_ready then sy.guest_send(log, "ready") end
+          if phase_t == 60 and M_early_ready then sy.guest_send(log, "ready") end   -- once more, in case the intro took it back
+          if phase_t >= 45 or M_early_ready then require("avatar").apply(log) end
           if phase_t == 66 then
             local pc = local_pc()
             if pc and not valid(safe(function() return pc.Pawn end)) then
@@ -418,25 +436,44 @@ LoopAsync(3000, function()
           end
           if M_play_t == 117 then touch("host_drive_done") end
         end
+        if TEST == "cultists" and M_restart then
+          -- do kills show on both machines? host kills one, guest kills another
+          M_play_t = (M_play_t or 0) + 3
+          local en, sync = require("enemies"), require("sync")
+          local cs = {}
+          for _, e in ipairs(FindAllOf("Cultist_C") or {}) do if valid(e) and not e:GetFullName():find("Default__") then table.insert(cs, e) end end
+          table.sort(cs, function(a, b) return a:GetFName():ToString() < b:GetFName():ToString() end)
+          local A, B = cs[1], cs[2]
+          if M_play_t == 9 and A then log("CULTTEST host kills " .. A:GetFName():ToString()); pcall(function() A:Damage(100.0, 1.0, nil) end) end
+          if M_play_t == 18 and B then log("CULTTEST guest kills " .. B:GetFName():ToString()); sync.send(log, "killcultist|" .. B:GetFName():ToString()) end
+          if M_play_t % 6 == 0 then
+            for _, e in ipairs({ A, B }) do if valid(e) then log("CULTTEST host " .. en.describe(e)) end end
+          end
+          if M_play_t == 15 then require("respawn").mark_false_death(12); local me = require("explore").own(log); if me then log("CULTTEST host false death"); pcall(function() me:Damage(1000.0, 1.0, nil) end) end end
+          if M_play_t == 45 then touch("host_drive_done") end
+        end
         if TEST == "guns" and M_restart then
           M_play_t = (M_play_t or 0) + 3
           local en, sync, train = require("enemies"), require("sync"), require("train")
           if M_play_t == 6 then
-            local me = require("explore").own(log)
-            if me then
-              local l, f, r = me:K2_GetActorLocation(), me:GetActorForwardVector(), me:K2_GetActorRotation()
-              sync.send(log, string.format("board|%.2f|%.2f|%.2f|%.1f", l.X + f.X * 300, l.Y + f.Y * 300, l.Z + 20, r.Yaw + 180))
-            end
+            -- the train's own spawn spot: 300 units in front of the host could be on the
+            -- rails ahead of the train (the train hardly moved in 181147)
+            local rs = require("respawn")
+            local spot = rs.train_spot(1)
+            local t0 = train.find()
+            if spot and t0 then sync.send(log, string.format("board|%.2f|%.2f|%.2f|%.1f", spot.X, spot.Y, spot.Z, t0:K2_GetActorRotation().Yaw)) end
           end
           if M_play_t == 12 then log("GUNTEST drive"); train.drive_long(log, 75, function() log("GUNTEST drive done") end) end
           local ch = FindFirstOf("CharlesCharacter_C")
           local t = train.find()
           local d = (valid(ch) and t) and (function() local a, b = ch:K2_GetActorLocation(), t:K2_GetActorLocation(); return math.sqrt((a.X-b.X)^2+(a.Y-b.Y)^2) end)() or -1
           if M_play_t >= 12 and valid(ch) then
+            local gr = t and safe(function() return t["Gun Rotator"]:K2_GetComponentRotation() end)
+            if gr then log(string.format("GUNTEST host gun rotator yaw=%.0f pitch=%.0f mirrored=%s", gr.Yaw, gr.Pitch, tostring(require("turret").n))) end
             log(string.format("GUNTEST t=%d charles-train=%.0f recent=%s hit=%s %s", M_play_t, d, tostring(safe(function() return ch["Recent Damage"] end)),
               tostring(safe(function() return ch["Was Just Hit"] end)), en.describe(ch)))
           end
-          if not M_gun_sent and M_play_t >= 24 and d > 0 and d < 7000 then
+          if not M_gun_sent and M_play_t >= 24 and ((d > 0 and d < 7000) or M_play_t >= 45) then
             M_gun_sent = true
             log("GUNTEST guest opens fire"); sync.send(log, "gunfire|30")
             -- (teleporting Charles next to the train got him stuck against it and stopped
@@ -484,7 +521,7 @@ LoopAsync(3000, function()
             end
           end
           if M_play_t % 12 == 0 then en.scan(log, "host t=" .. M_play_t) end
-          if M_play_t % 6 == 0 then log("ENEMYTEST train " .. train.state()) end
+          if M_play_t % 6 == 0 then log("ENEMYTEST train " .. train.state() .. " " .. train.flags()) end
           -- 1. Charles sleeps (MovementMode 0) until the train moves: drive
           if M_play_t == 12 then log("ENEMYTEST drive"); train.drive_long(log, 45, function() log("ENEMYTEST drive done") end) end
           M_charles = FindFirstOf("CharlesCharacter_C")
@@ -592,10 +629,16 @@ LoopAsync(3000, function()
       elseif phase == "joining" then
         if net:find("^client") and not in_menu(wp) then log("JOINED host world " .. wp); go("joined") end
         if phase_t >= 120 then log("FAIL: guest did not join within 120 s"); shot("guest join failed"); touch("guest_done"); go("done") end
-      elseif phase == "joined" and ((TEST == "train_sync" or TEST == "train_long" or TEST == "train_ride") or TEST == "play" or TEST == "coop" or TEST == "enemies" or TEST == "deathcall" or TEST == "guns") then
+      elseif phase == "joined" and ((TEST == "train_sync" or TEST == "train_long" or TEST == "train_ride") or TEST == "play" or TEST == "coop" or TEST == "enemies" or TEST == "deathcall" or TEST == "guns" or TEST == "cultists") then
         if phase_t >= 3 then guest_services() end
         if phase_t >= 51 then require("avatar").apply(log) end
         if (TEST == "play" or TEST == "coop" or TEST == "guns") and phase_t >= 51 and phase_t % 6 == 0 then shot("guest play") end
+        if TEST == "cultists" and phase_t >= 51 and phase_t % 6 == 0 then
+          local cs = {}
+          for _, e in ipairs(FindAllOf("Cultist_C") or {}) do if valid(e) and not e:GetFullName():find("Default__") then table.insert(cs, e) end end
+          table.sort(cs, function(a, b) return a:GetFName():ToString() < b:GetFName():ToString() end)
+          for i = 1, 2 do if cs[i] then log("CULTTEST guest " .. require("enemies").describe(cs[i])) end end
+        end
         if TEST == "enemies" and phase_t >= 51 and phase_t % 6 == 0 then require("enemies").scan(log, "guest t=" .. phase_t); shot("guest enemies") end
         if TEST == "enemies" and phase_t >= 51 and phase_t % 3 == 0 then
           local c = FindFirstOf("CharlesCharacter_C")

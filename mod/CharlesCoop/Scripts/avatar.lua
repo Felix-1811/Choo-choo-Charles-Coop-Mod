@@ -66,7 +66,14 @@ function M.apply(log)
       -- within a second (run 20261031-165751): wait until a second check still sees it
       M.seen = M.seen or {}
       M.seen[name] = (M.seen[name] or 0) + 1
-      if not M.done[name] and M.seen[name] >= 2 then
+      -- and on a respawned character 3 s was still too early (host crash, run 202328):
+      -- wait for 3 checks, a controller and a mesh component
+      -- (a controller only exists where we have authority: guests never see one on others)
+      local authority = safe(function() return ch.Role end) == 3
+      local ready = M.seen[name] >= 3 and (not authority or valid(safe(function() return ch.Controller end)))
+        and valid(safe(function() return ch.Mesh end))   -- (IsRegistered is not callable from Lua: run 203031 gave no bodies)
+        and not safe(function() return ch:IsActorBeingDestroyed() end, false)
+      if not M.done[name] and ready then
         M.done[name] = true
         local mname = M.MESHES[((n - 1) % #M.MESHES) + 1]
         local skm = load(DIR .. mname .. "." .. mname)

@@ -4,6 +4,10 @@ local function safe(f, d) local ok, v = pcall(f); if ok then return v end; retur
 local function valid(o) return o ~= nil and safe(function() return o:IsValid() end, false) end
 
 function M.find()
+  -- the scheduler's hook hands us the ticking train every frame: no FindAllOf (it walks
+  -- every object, and find() runs ~30 times a second)
+  local sc = package.loaded["sched"]
+  if sc and sc.train and sc.from_hook and os.clock() - sc.from_hook < 1 then return sc.train end
   for _, t in ipairs(FindAllOf("PlayerTrain_C") or {}) do
     if valid(t) and not t:GetFullName():find("Default__") then return t end
   end
@@ -95,16 +99,21 @@ end
 -- Host: hold the train at full speed for `secs` seconds (crosses several rails). Calls done().
 function M.drive_long(log, secs, done)
   local ticks = 0
-  LoopAsync(100, function()
+  local sched = require("sched"); sched.install(log)
+  sched.every("test_drive", 0.1, function()
     ticks = ticks + 1
-    ExecuteInGameThread(function()
-      local t = M.find(); if not t then return end
+    local t = M.find()
+    if t then
       if ticks == 1 then safe(function() t["Can move at all?"] = true end); safe(function() t["Can Move?"] = true end) end
       safe(function() t["Train Speed"] = t["Forward Max Speed"] end)
-      if ticks % 50 == 0 then log("TRAIN L " .. M.state(t)) end
-    end)
-    if ticks >= secs * 10 then done(); return true end
-    return false
+      -- the train sometimes did not move at speed 8 with the brake lever up (runs 195524 ..
+      -- 201348): release it for the test drive
+      if os.getenv("COOP_DRIVE_RELEASE") ~= "0" then
+        safe(function() t["Lever 3 up?"] = false end); safe(function() t["Stopping Train"] = false end)
+      end
+      if ticks % 50 == 0 then log("TRAIN L " .. M.state(t) .. " " .. M.flags(t)) end
+    end
+    if ticks >= secs * 10 then sched.stop("test_drive"); done() end
   end)
 end
 
@@ -371,5 +380,17 @@ function M.drive_experiment(log, done)
     if ticks >= 300 then done(); return true end
     return false
   end)
+end
+-- Debug: every bool on the train plus tick state (to find why it sometimes won't move).
+local FLAGS = { "Stopping Train", "inside train?", "Setting Movement", "Horn Pulled?", "Can Move?", "Using Gun?",
+  "Using Upgrade Menu?", "Using Map", "Tutorial Mode", "Broken Down", "Charles Alive", "Lever 1 up?", "Lever 2 up?",
+  "Lever 3 up?", "Inside 2", "Inside 1", "Lever Tutorial?", "Just Hit", "Side Levers Activated? Tutorial", "Gun Lock?",
+  "Movement During Cutscene", "Can move at all?", "Made on spawn" }
+function M.flags(t)
+  t = t or M.find(); if not t then return "no train" end
+  local on = {}
+  for _, k in ipairs(FLAGS) do if safe(function() return t[k] end) == true then table.insert(on, k) end end
+  return string.format("tick=%s dil=%s on=[%s]", tostring(safe(function() return t:IsActorTickEnabled() end)),
+    tostring(safe(function() return t.CustomTimeDilation end)), table.concat(on, ","))
 end
 return M

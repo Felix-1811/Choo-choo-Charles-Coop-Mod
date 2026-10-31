@@ -54,13 +54,19 @@ function M.guest_fire(log, secs)
   }
   local stage
   local ticks = 0
-  LoopAsync(100, function()
+  local sched = require("sched"); sched.install(log)
+  sched.every("test_gun", 0.1, function()
     ticks = ticks + 1
-    ExecuteInGameThread(function()
+    do
       local ch = FindFirstOf("CharlesCharacter_C")
       local gun = safe(function() return t["Machine Gun"] end)
       local from = valid(gun) and safe(function() return gun:K2_GetComponentLocation() end) or safe(function() return t:K2_GetActorLocation() end)
       local to = valid(ch) and safe(function() return ch:K2_GetActorLocation() end)
+      -- Charles far away: sweep the gun so the aim mirror has something to show
+      if not to or (from and math.abs(to.X - from.X) + math.abs(to.Y - from.Y) > 20000) then
+        local a = math.rad(ticks * 3)
+        to = from and { X = from.X + math.cos(a) * 3000, Y = from.Y + math.sin(a) * 3000, Z = from.Z } or nil
+      end
       if pc and from and to then
         local yaw, pitch = aim(pc, from, to)
         -- the gun follows mouse-look input, not the control rotation: turn it directly
@@ -87,15 +93,11 @@ function M.guest_fire(log, secs)
       end
       if stage and stage.every and me then pcall(stage.f) end
       if ticks % 10 == 5 and stage then log("GUNS " .. stage.name .. " t=" .. ticks / 10 .. " " .. state(t) .. " hits_tx=" .. tostring(require("enemies").hits_tx)) end
-    end)
-    if ticks >= secs * 10 then
-      ExecuteInGameThread(function()
-        pcall(function() t["Fire Gun Released"](t) end)
-        log("GUNS released | " .. state(t))
-      end)
-      return true
     end
-    return false
+    if ticks >= secs * 10 then
+      sched.stop("test_gun")
+      log("GUNS released | " .. state(t))
+    end
   end)
 end
 return M

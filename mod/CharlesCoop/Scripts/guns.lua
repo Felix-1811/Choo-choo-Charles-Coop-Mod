@@ -13,6 +13,26 @@ local function state(t)
 end
 M.state = state
 
+-- What the gun's effect components are doing right now (how the game drives them).
+-- Only members the component's class has (SDK dump): reading a wrong member, or going through
+-- a null object, can fault inside UE4SS where pcall can't catch it (guest crash, runs 20261101-135836, 140824).
+local PARTICLES = { "Muzzle Flash", "Sheel Ejection", "Muzzle Flare Particle Left", "Muzzle Flare Particle Right", "Sheel Ejection1", "Sheel Ejection2", "P_Flamethrower" }
+local AUDIO = { "Audio", "OverheatingSound" }
+function M.fx_report(t)
+  local out = {}
+  for _, n in ipairs(PARTICLES) do
+    local c = safe(function() return t[n] end)
+    if valid(c) then table.insert(out, fmt("%s[a=%s]", n, tostring(safe(function() return c:IsActive() end)))) end
+  end
+  for _, n in ipairs(AUDIO) do
+    local c = safe(function() return t[n] end)
+    if valid(c) then table.insert(out, fmt("%s[p=%s]", n, tostring(safe(function() return c:IsPlaying() end)))) end
+  end
+  local l = safe(function() return t["Muzzle Light"] end)
+  if valid(l) then table.insert(out, fmt("Muzzle Light[v=%s]", tostring(safe(function() return l:IsVisible() end)))) end
+  return table.concat(out, " ")
+end
+
 local function own_pc()
   for _, pc in ipairs(FindAllOf("PlayerController") or {}) do
     if valid(pc) and safe(function() return pc:IsLocalController() end, false) then return pc end
@@ -93,6 +113,7 @@ function M.guest_fire(log, secs)
       end
       if stage and stage.every and me then pcall(stage.f) end
       if ticks % 10 == 5 and stage then log("GUNS " .. stage.name .. " t=" .. ticks / 10 .. " " .. state(t) .. " hits_tx=" .. tostring(require("enemies").hits_tx)) end
+      if ticks % 20 == 3 then log("GUNFX t=" .. ticks / 10 .. " " .. M.fx_report(t)) end
     end
     if ticks >= secs * 10 then
       sched.stop("test_gun")

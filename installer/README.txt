@@ -1,4 +1,4 @@
-CharlesCoop 0.3.1 - online co-op for Choo-Choo Charles (Steam, game version 1.2.0)
+CharlesCoop 0.4.0 - online co-op for Choo-Choo Charles (Steam, game version 1.2.0)
 ====================================================================================
 
 Everyone who plays needs their own copy of the game and these files.
@@ -13,10 +13,11 @@ Play:
             saved game for your friends. Pick up the train key in single player first:
             before that, the train levers do not work for anyone.
   Join.bat  A friend. Enter the host's address; the game connects by itself at the main
-            menu. About 15 seconds after loading in you get your character, standing on
-            the host's train. If the connection drops, the game joins again by itself. Your own save is backed up first, because the game
-            autosaves the host's world into your save slot.
-  Solo.bat  Normal single player. Offers to restore your own save from before co-op.
+            menu. It loads the host's story and the world once more, then you stand on
+            the host's train (about a minute in all). Your own save is kept safe first,
+            and only your settings stay in the slot while you play co-op.
+  Solo.bat  Normal single player. Puts your own save back by itself; the co-op state is
+            kept beside it.
 
 Connecting over the internet: the host needs UDP port 7777 reachable. The easiest way is
 a free VPN that everyone joins (Tailscale, ZeroTier, Radmin VPN); then use the host's VPN
@@ -36,14 +37,22 @@ What works (tested with two copies of the game on one PC):
     train moves. If he catches a friend on foot, that friend respawns on the train and
     he leaves them alone for 20 seconds
   - cultists killed by anyone are dead for everyone
+  - the story is shared: missions, doors, chests, mission objects and track switches. What
+    one player does counts for everyone, and it stays in the host's save. A friend joining
+    late gets the story so far
+  - the ending: summoning Charles, the boss fight and the final cutscene play for everyone
   - the train gun: anyone can use it, and a friend's hits damage Charles and the cultists
-    for real. Everyone sees where the gun is pointing
+    for real. Everyone sees where the gun points, and its flash when it fires
 
 Known issues:
   - the game has one health bar for "player 0". A lethal hit on a friend's character can
     make the host die for a moment; the host is put back on the spot at once
-  - upgrades and the story (quests, cutscenes) are not shared yet
-  - the host does not see a friend's gun fire, only where it points
+  - the story has been tested by test bots, not yet played start to finish by people
+  - a bought upgrade is saved for everyone, but only takes effect for the others after
+    they load the game again
+  - weather and scrap crates can differ between players until a friend joins again
+  - you hear nothing when a friend fires the gun (no sound yet, only the flash)
+  - no on-screen message yet when a friend starts or finishes a mission
   - the game crashed now and then in testing (more often in long gun tests); it is
     being worked on
   - the train can flicker for a moment where one track joins the next

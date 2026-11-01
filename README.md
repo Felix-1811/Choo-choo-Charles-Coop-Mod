@@ -52,7 +52,10 @@ Tested with two copies of the game on one PC (`test/run_pair.ps1`, scenario `coo
 | Cultists killed by anyone are dead for everyone (also for late joiners) | works |
 | Guest gets their character ~15 s after loading in; rejoins after a dropped connection | works (rejoin: code path only, not forced in a test) |
 | Host sees the guest's gun fire (muzzle flash, sound) | not done |
-| Upgrades, story events (quests, cutscenes) shared | not done |
+| Story: missions, doors, chests, mission objects, track switches shared; late joiners get the story | bot tests: 161 of 161 clicks replayed, no crash (run 181252) |
+| Summon, boss fight start, final cutscene on every machine | bot test with a hand-made save, Charles killed by a test hit (run 175716). Credits not reached in a test |
+| Upgrades take effect live for the other players | not done (saved for everyone, applied on next load) |
+| Whole story played start to finish by people | not done |
 | Two different PCs over the internet | untested |
 
 Latest `coop` run (2026-10-31): host and guest each pick up an item and the other side
@@ -67,6 +70,10 @@ aimed at the host switches to the nearer guest by itself. `guns` run: a machine-
 from the guest's copy of the gun (2.07 on Charles's legs) was applied to the host's Charles.
 
 ### Known issues
+
+- Weather and scrap crates roll separately on each machine; a joining guest starts from the host's values, but they can differ afterwards.
+- A friend's gun fire shows as effects only, with no sound.
+- No on-screen message when a friend starts or finishes a mission.
 
 - The game has one health bar, "player 0's". Damage to any character lowers it, so a
   lethal hit on a friend's character can make the host die for a moment. The mod spots

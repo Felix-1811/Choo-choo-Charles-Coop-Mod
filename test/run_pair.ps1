@@ -1,16 +1,12 @@
-# Two-instance test on one PC: host + guest over 127.0.0.1, on a COPY of the game only.
-# Usage: powershell -File test\run_pair.ps1 -GameCopy "<copy of the game folder>" [-Test coop] [-Seed <save folder copy>]
-un_pair.ps1 -GameCopy "<copy of the game folder>" [-Test coop] [-Seed <save folder copy>]
-un_pair.ps1 -GameCopy "<copy of the game folder>" [-Test coop] [-Seed <save folder copy>]
-#   -Test coop|play|train_drive|...  scripted scenario (see main.lua); -Real: normal play mode
-#   -HostOnly: one instance; -Seed: copy these .sav files into each instance's own -userdir
-param([int]$TimeoutSec = 600, [string]$Net = "ip", [switch]$HostOnly, [string]$Test = "", [string]$Seed = "", [switch]$Real,
-      [string]$GameCopy = (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) "test-install\Choo-Choo Charles"))
+﻿# Two-instance test on one PC: host + guest over 127.0.0.1, test copy only.
+# Usage: powershell -File run_pair.ps1 [-TimeoutSec 600] [-Net ip]
+param([int]$TimeoutSec = 600, [string]$Net = "ip", [switch]$HostOnly, [string]$Test = "", [string]$Seed = "", [switch]$Real, [switch]$SeedHostOnly, [switch]$Shots)
 $ErrorActionPreference = "Stop"
-$root    = Split-Path -Parent $PSScriptRoot                     # repo root
-$win64   = Join-Path $GameCopy "Obscure\Binaries\Win64"
+$root    = Split-Path -Parent $PSScriptRoot                     # local/CharlesCoop
+$local   = Split-Path -Parent $root                             # local/
+$win64   = Join-Path $local "test-install\Choo-Choo Charles\Obscure\Binaries\Win64"
 $exe     = Join-Path $win64 "Obscure-Win64-Shipping.exe"
-$run     = Join-Path $root ("runs\" + (Get-Date -Format "yyyyMMdd-HHmmss"))
+$run     = Join-Path $local ("runs\" + (Get-Date -Format "yyyyMMdd-HHmmss"))
 $realSaved = Join-Path $env:LOCALAPPDATA "Obscure\Saved"
 New-Item -ItemType Directory -Force $run | Out-Null
 
@@ -33,11 +29,17 @@ $before = Fingerprint $realSaved
 
 $procs = @()
 function Start-Role($role, $x) {
-  $env:COOP_ROLE = $role; if (-not $Real) { $env:COOP_SYNC_DIR = ($run -replace '\\','/') }; $env:COOP_NET = $Net; $env:COOP_TEST = $Test
+  $env:COOP_ROLE = $role; if (-not $Real) { $env:COOP_SYNC_DIR = ($run -replace '\\','/') }; $env:COOP_NET = $Net; $env:COOP_SHOTS = $(if ($Shots) { "1" } else { "0" }); $env:COOP_TEST = $Test
   $ud = Join-Path $run "userdir-$role"
   New-Item -ItemType Directory -Force $ud | Out-Null
-  # optional story progress: a copy of a save snapshot (never the real save folder)
-  if ($Seed) { $sg = New-Item -ItemType Directory -Force (Join-Path $ud "Saved\SaveGames"); Copy-Item (Join-Path $Seed "*.sav") $sg }
+  # optional story progress: a copy of a save snapshot from local/ (never the real folder)
+  $env:COOP_SAVE_DIR = (Join-Path $ud "Saved\SaveGames").Replace([char]92, [char]47)
+  if ($Seed -and ($role -eq "host" -or -not $SeedHostOnly)) { $sg = New-Item -ItemType Directory -Force (Join-Path $ud "Saved\SaveGames"); Copy-Item (Join-Path $Seed "*.sav") $sg }
+  if ($role -eq "host") {
+    # what Play.ps1 does for a real host: the list of keys in the save
+    $kf = Join-Path $win64 "Mods\CharlesCoop\savekeys.txt"
+    if ($Seed) { Get-ChildItem $Seed -Filter "*.sav" | ForEach-Object { $_.BaseName } | Set-Content -Encoding ascii $kf } else { Set-Content -Encoding ascii $kf "" }
+  }
   $a = @("-windowed", "-ResX=960", "-ResY=540", "-WinX=$x", "-WinY=40", "-nosplash", "-userdir=`"$ud`"")
   $p = Start-Process -FilePath $exe -ArgumentList $a -WorkingDirectory $win64 -PassThru
   Write-Host "started $role pid=$($p.Id)"
@@ -46,15 +48,15 @@ function Start-Role($role, $x) {
 if ($Real) { Remove-Item (Join-Path $win64 "Mods/CharlesCoop/probe_*.log") -ErrorAction SilentlyContinue }
 $procs += Start-Role "host" 0
 if (-not $HostOnly) { Start-Sleep -Seconds 5; $procs += Start-Role "guest" 970 }
-Remove-Item Env:COOP_ROLE, Env:COOP_SYNC_DIR, Env:COOP_NET, Env:COOP_TEST -ErrorAction SilentlyContinue
+Remove-Item Env:COOP_ROLE, Env:COOP_SYNC_DIR, Env:COOP_NET, Env:COOP_TEST, Env:COOP_SAVE_DIR, Env:COOP_SHOTS -ErrorAction SilentlyContinue
 
 $deadline = (Get-Date).AddSeconds($TimeoutSec)
 # -Real: normal play mode (no hand-off files); runs for the whole timeout, logs in Mods\CharlesCoop
 $modLogs = Join-Path $win64 "Mods\CharlesCoop"
 $want = if ($HostOnly) { "host_done","host_failed" } else { "guest_done" }
-# No desktop screenshots and no synthetic keys: someone may be using the PC while tests
-# run. The game takes its own screenshots (HighResShot, scene only) and the in-game bot
-# replaces the W key.
+# No desktop screenshots and no synthetic keys: the owner may be using the PC while tests
+# run (a desktop capture on 2026-10-30 caught their browser). The game takes its own
+# screenshots (HighResShot, scene only) and the in-game bot replaces the W key.
 $tick = 0
 while ((Get-Date) -lt $deadline) {
   $tick++

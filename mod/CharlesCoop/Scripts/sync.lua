@@ -33,6 +33,16 @@ function M.send(log, msg)
   end
 end
 
+-- Host: to every guest except the one a message came from (its full name).
+function M.send_except(log, msg, from)
+  for _, pc in ipairs(remote_pcs()) do
+    if safe(function() return pc:GetFullName() end) ~= from then
+      local ok, err = pcall(function() pc:ClientMessage("COOP|" .. msg, FName("None"), 0.0) end)
+      if not ok then log("sync: send failed: " .. tostring(err)) end
+    end
+  end
+end
+
 function M.host_tick(log)
   local cmsg = safe(function() return require("enemies").host_msg() end)
   if cmsg then
@@ -121,6 +131,7 @@ function M.install_host(log)
       local body = msg:sub(6)
       -- frequent messages are stored, not queued (see turret.lua)
       if body:sub(1, 7) == "gunaim|" then require("turret").receive(body); return end
+      if body:sub(1, 6) == "story|" then require("story").receive(body, safe(function() return pc:GetFullName() end)); return end
       ExecuteInGameThread(function() M.host_handle(log, body, pc) end)
     end)
   end)
@@ -154,7 +165,8 @@ end
 function M.host_handle(log, body, pc)
   local f = {}
   for v in body:gmatch("[^|]+") do table.insert(f, v) end
-  if f[1] == "ready" then if valid(pc) then M.restart_guest(log, pc) end
+  if f[1] == "snapreq" then require("story").host_snapshot_request(log)
+  elseif f[1] == "ready" then if valid(pc) then M.restart_guest(log, pc) end
   elseif f[1] == "died" then log("sync: guest reports its death"); require("respawn").queue(log, pc,
     f[4] and { X = tonumber(f[2]), Y = tonumber(f[3]), Z = tonumber(f[4]) } or nil)
   elseif f[1] == "gather" then require("progress").host_gathered_by_guest(log, f[2], pc)
@@ -242,6 +254,8 @@ function M.install_guest(log)
         if c then pcall(function() c:Damage(a, 1.0, c["Body Hitbox"]) end) end
       end) end
       if body:sub(1, 8) == "gunfire|" then ExecuteInGameThread(function() require("guns").guest_fire(log, tonumber(body:sub(9)) or 10) end) end
+      if body:sub(1, 6) == "story|" then require("story").receive(body); return end
+      if body:sub(1, 10) == "storytest|" then ExecuteInGameThread(function() require("story").guest_msg(log, body) end) end
       if body == "fetch" then ExecuteInGameThread(function() require("progress").fetch_test(log) end) end
       if body == "levers" then ExecuteInGameThread(function() train.guest_lever_test(log) end) end
     end)

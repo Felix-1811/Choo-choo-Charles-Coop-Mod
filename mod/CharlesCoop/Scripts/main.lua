@@ -2,7 +2,7 @@
 -- Phase 1 goal: can the engine's own netcode put a second player in the host's world?
 -- Role comes from the environment (COOP_ROLE=host|guest), never from keys: UE4SS key
 -- binds reach every running copy (playbook/lessons.md #55).
-local VERSION = "0.3.1"
+local VERSION = "0.4.0"
 -- Players set role and host address in Mods/CharlesCoop/coop.ini (written by the
 -- launcher scripts); the environment overrides it for the test harness.
 -- This mod's folder: from the script path, so it works whatever the working directory is.
@@ -203,7 +203,9 @@ local function walk_menu()
 end
 
 local shots = 0
+-- Test screenshots are off unless a test asks for them (run_pair.ps1 -Shots).
 local function shot(tag)
+  if os.getenv("COOP_SHOTS") ~= "1" then return end
   shots = shots + 1
   console("HighResShot 960x540")
   log("screenshot #" .. shots .. " (" .. tag .. ")")
@@ -225,6 +227,7 @@ local function host_services(conns)
   require("avatar").apply(log)
   require("progress").install(log, "host", function(m) sync.send(log, m) end)
   require("turret").install(log, function(m) sync.send(log, m) end)
+  require("story").install(log, "host", function(m) sync.send(log, m) end, function(m, from) sync.send_except(log, m, from) end)
   if os.getenv("COOP_RETARGET") ~= "0" then local en = require("enemies"); en.install(log); en.retarget(log) end
   if not M_stream then
     M_stream = true
@@ -241,6 +244,7 @@ local function guest_services()
     require("respawn").install(log, "guest", function(m) sy.guest_send(log, m) end)
     require("progress").install(log, "guest", function(m) sy.guest_send(log, m) end)
     require("turret").install(log, function(m) sy.guest_send(log, m) end)
+    require("story").install(log, "guest", function(m) sy.guest_send(log, m) end)
   end
   require("respawn").watch_screens(log)
 end
@@ -271,9 +275,15 @@ if not SYNC then
           if net:find("^client") and not in_menu(wp) then log("joined " .. HOST_ADDR .. " " .. wp); go("joined")
           elseif phase_t >= 90 then log("could not reach the host at " .. HOST_ADDR .. ", retrying"); go("boot") end
         elseif phase == "joined" then
-          if in_menu(wp) then log("disconnected: back to the menu, joining again"); M_early_ready, M_vt_ok = nil, 0; go("boot"); return end
+          if in_menu(wp) then log("disconnected: back to the menu, joining again"); M_early_ready, M_vt_ok = nil, 0; require("story").guest_reset(log); go("boot"); return end
           local sy = require("sync")
           guest_services()
+          local st = require("story").guest_join_step(log)
+          if st == "reload" then
+            log("story: loading the world again with the host's story")
+            M_early_ready, M_vt_ok = nil, 0; go("joining"); console("open " .. HOST_ADDR); return
+          end
+          if st == "wait" then return end
           -- the host hands over the character once the guest's own intro has run. The intro
           -- is over when our camera rests on a player character (the boat intro uses its own
           -- camera); 6 s of that -> ready. 45 s / 60 s stay as the fallback.
@@ -376,6 +386,10 @@ LoopAsync(3000, function()
       elseif phase == "wait_guest" then
         local conns = tonumber(net:match("conns=(%d+)")) or 0
         if conns > 0 and phase_t % 15 == 0 then shot("host with guest") end
+        if TEST:find("^story") and conns > 0 then
+          require("sync").install_host(log)
+          require("story").install(log, "host", function(m) require("sync").send(log, m) end, function(m, from) require("sync").send_except(log, m, from) end)
+        end
         if exists("guest_intro_done") and not M_restart then
           M_restart = true
           for _, pc in ipairs(FindAllOf("PlayerController") or {}) do
@@ -452,6 +466,18 @@ LoopAsync(3000, function()
           if M_play_t == 15 then require("respawn").mark_false_death(12); local me = require("explore").own(log); if me then log("CULTTEST host false death"); pcall(function() me:Damage(1000.0, 1.0, nil) end) end end
           if M_play_t == 45 then touch("host_drive_done") end
         end
+        if TEST == "story_sweep" and M_restart then
+          M_play_t = (M_play_t or 0) + 3
+          require("story").sweep_test_host(log, M_play_t, require("sync"), touch)
+        end
+        if TEST == "story_end" and M_restart then
+          M_play_t = (M_play_t or 0) + 3
+          require("story").end_test_host(log, M_play_t, require("sync"), touch, shot)
+        end
+        if TEST == "story" and M_restart then
+          M_play_t = (M_play_t or 0) + 3
+          require("story").test_host(log, M_play_t, require("sync"), touch)
+        end
         if TEST == "guns" and M_restart then
           M_play_t = (M_play_t or 0) + 3
           local en, sync, train = require("enemies"), require("sync"), require("train")
@@ -470,6 +496,7 @@ LoopAsync(3000, function()
           if M_play_t >= 12 and valid(ch) then
             local gr = t and safe(function() return t["Gun Rotator"]:K2_GetComponentRotation() end)
             if gr then log(string.format("GUNTEST host gun rotator yaw=%.0f pitch=%.0f mirrored=%s", gr.Yaw, gr.Pitch, tostring(require("turret").n))) end
+            if t then log("GUNTEST host fx " .. require("guns").fx_report(t)) end
             log(string.format("GUNTEST t=%d charles-train=%.0f recent=%s hit=%s %s", M_play_t, d, tostring(safe(function() return ch["Recent Damage"] end)),
               tostring(safe(function() return ch["Was Just Hit"] end)), en.describe(ch)))
           end
@@ -619,7 +646,7 @@ LoopAsync(3000, function()
         if exists("guest_walk_start") and not M_walk_s then M_walk_s = true; who("host walk start") end
         if exists("guest_walk_end") and not M_walk_e then M_walk_e = true; who("host walk end") end
         if exists("guest_done") then shot("host final"); go("done"); touch("host_done") end
-        if phase_t >= 300 then log("timeout waiting for guest"); touch("host_done"); go("done") end
+        if phase_t >= (TEST:find("^story_") and 720 or 300) then log("timeout waiting for guest"); touch("host_done"); go("done") end
       end
     elseif ROLE == "guest" then
       if phase == "boot" and phase_t >= 9 and FindFirstOf("Main_MainMenu_C") then go("wait_host") end
@@ -629,8 +656,17 @@ LoopAsync(3000, function()
       elseif phase == "joining" then
         if net:find("^client") and not in_menu(wp) then log("JOINED host world " .. wp); go("joined") end
         if phase_t >= 120 then log("FAIL: guest did not join within 120 s"); shot("guest join failed"); touch("guest_done"); go("done") end
-      elseif phase == "joined" and ((TEST == "train_sync" or TEST == "train_long" or TEST == "train_ride") or TEST == "play" or TEST == "coop" or TEST == "enemies" or TEST == "deathcall" or TEST == "guns" or TEST == "cultists") then
+      elseif phase == "joined" and ((TEST == "train_sync" or TEST == "train_long" or TEST == "train_ride") or TEST == "play" or TEST == "coop" or TEST == "enemies" or TEST == "deathcall" or TEST == "guns" or TEST == "cultists" or TEST == "story" or TEST == "story_end" or TEST == "story_sweep") then
         if phase_t >= 3 then guest_services() end
+        if TEST:find("^story") and phase_t >= 6 then
+          require("story").shot = shot
+          local st = require("story").guest_join_step(log)
+          if st == "reload" then
+            log("story: loading the world again with the host's story")
+            go("joining"); console("open " .. HOST_ADDR); return
+          end
+          if st == "wait" then return end
+        end
         if phase_t >= 51 then require("avatar").apply(log) end
         if (TEST == "play" or TEST == "coop" or TEST == "guns") and phase_t >= 51 and phase_t % 6 == 0 then shot("guest play") end
         if TEST == "cultists" and phase_t >= 51 and phase_t % 6 == 0 then
